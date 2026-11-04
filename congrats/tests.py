@@ -1,22 +1,3 @@
-
-Run it with no database server:   DB_ENGINE=sqlite python manage.py test
-Your CI pipeline must run these and stop if any fail.
-"""
-from unittest import mock
-
-from django.core.cache import cache
-from django.test import TestCase, override_settings
-
-
-class HomePageTests(TestCase):
-    def setUp(self):
-        cache.clear()
-
-    def test_home_page_renders(self):
-        response = self.client.get("/")
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Techcake")
-
 """Test suite for the Techcake app.
 Run it with no database server:   DB_ENGINE=sqlite python manage.py test
 Your CI pipeline must run these and stop if any fail.
