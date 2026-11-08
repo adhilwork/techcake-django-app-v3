@@ -1,21 +1,27 @@
 name: Django CI and ECR CD
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
 permissions:
   contents: read
   id-token: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - run: pip install -r requirements.txt
+
       - name: Django tests
         env:
           DB_ENGINE: sqlite
@@ -30,6 +36,34 @@ jobs:
       - name: Build Docker image
         run: |
           docker build --build-arg APP_VERSION=${{ github.sha }} -t techcake-django-app-v3:${{ github.sha }} .
+
+      - name: Generate Trivy scan report
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: techcake-django-app-v3:${{ github.sha }}
+          format: json
+          output: trivy-report.json
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Trivy security gate
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: techcake-django-app-v3:${{ github.sha }}
+          format: table
+          severity: CRITICAL
+          exit-code: '1'
+
+      - name: Upload Trivy scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-report
+          path: trivy-report.json
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Configure AWS credentials
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
