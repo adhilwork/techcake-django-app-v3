@@ -1,3 +1,4 @@
+
 name: Django CI and ECR CD
 
 on:
@@ -39,6 +40,12 @@ jobs:
         run: |
           docker build --build-arg APP_VERSION=${{ github.sha }} -t techcake-django-app-v3:${{ github.sha }} .
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
+        with:
+          version: v0.69.2
+          cache: true
+
       - name: Generate Trivy scan report
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -48,6 +55,7 @@ jobs:
           output: trivy-report.json
           severity: HIGH,CRITICAL
           exit-code: '0'
+          skip-setup-trivy: true
 
       - name: Trivy security gate
         uses: aquasecurity/trivy-action@v0.36.0
@@ -57,6 +65,7 @@ jobs:
           format: table
           severity: CRITICAL
           exit-code: '1'
+          skip-setup-trivy: true
 
       - name: Upload Trivy scan report
         if: always()
