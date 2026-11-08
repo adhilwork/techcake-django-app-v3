@@ -23,7 +23,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       - name: Django tests
         env:
@@ -33,6 +34,7 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -43,18 +45,28 @@ jobs:
       - name: Install Trivy
         run: |
           VERSION="0.69.3"
-          curl -sfL https://github.com/aquasecurity/trivy/releases/download/v${VERSION}/trivy_${VERSION}_Linux-64bit.tar.gz -o trivy.tar.gz
-          tar -xzf trivy.tar.gz trivy
-          sudo install trivy /usr/local/bin/trivy
+          curl -fL --retry 3 "https://github.com/aquasecurity/trivy/releases/download/v${VERSION}/trivy_${VERSION}_Linux-64bit.deb" -o trivy.deb
+          sudo dpkg -i trivy.deb
           trivy --version
 
       - name: Generate Trivy scan report
         run: |
-          trivy image --severity HIGH,CRITICAL --format json --output trivy-report.json techcake-django-app-v3:${{ github.sha }} --exit-code 0
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output trivy-report.json \
+            --exit-code 0 \
+            techcake-django-app-v3:${{ github.sha }}
 
       - name: Trivy security gate
         run: |
-          trivy image --severity CRITICAL --format table --exit-code 1 techcake-django-app-v3:${{ github.sha }}
+          trivy image \
+            --scanners vuln \
+            --severity CRITICAL \
+            --format table \
+            --exit-code 1 \
+            techcake-django-app-v3:${{ github.sha }}
 
       - name: Upload Trivy scan report
         if: always()
@@ -82,3 +94,4 @@ jobs:
         run: |
           docker tag techcake-django-app-v3:${{ github.sha }} ${{ steps.login-ecr.outputs.registry }}/techcake-django-app-v3:${{ github.sha }}
           docker push ${{ steps.login-ecr.outputs.registry }}/techcake-django-app-v3:${{ github.sha }}
+
