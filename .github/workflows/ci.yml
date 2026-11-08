@@ -40,7 +40,7 @@ jobs:
           docker build --build-arg APP_VERSION=${{ github.sha }} -t techcake-django-app-v3:${{ github.sha }} .
 
       - name: Generate Trivy scan report
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: image
           image-ref: techcake-django-app-v3:${{ github.sha }}
@@ -50,7 +50,7 @@ jobs:
           exit-code: '0'
 
       - name: Trivy security gate
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: image
           image-ref: techcake-django-app-v3:${{ github.sha }}
