@@ -1,3 +1,4 @@
+
 name: Django CI and ECR CD
 
 on:
@@ -42,9 +43,6 @@ jobs:
 
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
-        with:
-          version: v0.69.2
-          cache: true
 
       - name: Generate Trivy scan report
         uses: aquasecurity/trivy-action@v0.36.0
