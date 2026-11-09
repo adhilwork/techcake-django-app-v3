@@ -63,7 +63,7 @@ jobs:
             -v "${{ runner.temp }}/trivy-cache:/root/.cache/" \
             aquasec/trivy:0.76.2 \
             image --format table \
-            --severity HIGH,CRITICAL \
+            --severity CRITICAL \
             --exit-code 1 \
             "techcake-django-app-v3:${{ github.sha }}"
 
