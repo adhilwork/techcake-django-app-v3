@@ -12,4 +12,4 @@ ENV APP_VERSION=$APP_VERSION
 
 EXPOSE 8000
 
-CMD ["gunicorn", "techcake_site.wsgi:application", "--bind", "0.0.0.0:8000"]
+CMD ["gunicorn-broken", "techcake_site.wsgi:application", "--bind", "0.0.0.0:8000"]
