@@ -19,7 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Install Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -91,9 +92,22 @@ jobs:
 
       - name: Push image to ECR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker tag techcake-django-app-v3:${{ github.sha }} ${{ steps.login-ecr.outputs.registry }}/techcake-django-app-v3:${{ github.sha }}
-          docker push ${{ steps.login-ecr.outputs.registry }}/techcake-django-app-v3:${{ github.sha }}
+          IMAGE_EXISTS=$(aws ecr batch-get-image \
+            --repository-name techcake-django-app-v3 \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'images[0].imageId.imageTag' \
+            --output text 2>/dev/null || true)
+
+          if [ "$IMAGE_EXISTS" = "$IMAGE_TAG" ]; then
+            echo "Image already exists in ECR. Skipping push."
+          else
+            docker tag techcake-django-app-v3:$IMAGE_TAG $REGISTRY/techcake-django-app-v3:$IMAGE_TAG
+            docker push $REGISTRY/techcake-django-app-v3:$IMAGE_TAG
+          fi
 
   deploy:
     needs: build
@@ -218,7 +232,7 @@ jobs:
 
           STATUS="Pending"
 
-          for attempt in $(seq 1 72); do
+          for attempt in $(seq 1 180); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$COMMAND_ID" \
               --instance-id "$INSTANCE_ID" \
