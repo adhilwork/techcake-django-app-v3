@@ -1,3 +1,4 @@
+
 name: Django CI and ECR CD
 
 on:
@@ -93,3 +94,158 @@ jobs:
         run: |
           docker tag techcake-django-app-v3:${{ github.sha }} ${{ steps.login-ecr.outputs.registry }}/techcake-django-app-v3:${{ github.sha }}
           docker push ${{ steps.login-ecr.outputs.registry }}/techcake-django-app-v3:${{ github.sha }}
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::545931886180:role/GitHubActionsECRRole
+          aws-region: ap-south-1
+
+      - name: Deploy through SSM with automatic rollback
+        env:
+          INSTANCE_ID: i-0ec6e6efcabac1611
+        run: |
+          cat > remote-deploy.sh <<'REMOTE'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          GITHUB_SHA="${{ github.sha }}"
+          REGISTRY="545931886180.dkr.ecr.ap-south-1.amazonaws.com"
+          NEW_IMAGE="${REGISTRY}/techcake-django-app-v3:${GITHUB_SHA}"
+          COMPOSE="/root/docker-compose-v3.yml"
+          HEALTH_URL="https://djangov2.tc-0054.nixlabs.in/health"
+          OLD_IMAGE_TAG="django-v2:rollback-${GITHUB_SHA}"
+
+          test -f /root/.env
+          test -f /root/docker-compose.yml
+          docker inspect django-v2 >/dev/null
+          docker inspect nginx-proxy >/dev/null
+
+          OLD_IMAGE_ID=$(docker inspect -f '{{.Image}}' django-v2)
+          docker tag "$OLD_IMAGE_ID" "$OLD_IMAGE_TAG"
+
+          rollback() {
+            echo "DEPLOYMENT FAILED - STARTING AUTOMATIC ROLLBACK"
+
+            docker rm -f django-v2 >/dev/null 2>&1 || true
+
+            IMAGE_URI="$OLD_IMAGE_TAG" \
+              docker compose -f "$COMPOSE" -p root up -d django
+
+            docker exec nginx-proxy nginx -s reload || true
+
+            for attempt in $(seq 1 18); do
+              if curl -fsS --max-time 10 "$HEALTH_URL" >/dev/null; then
+                echo "ROLLBACK SUCCESSFUL - PREVIOUS APPLICATION RESTORED"
+                return 0
+              fi
+              sleep 5
+            done
+
+            echo "ROLLBACK HEALTH CHECK FAILED"
+            return 1
+          }
+
+          curl -fsSL \
+            "https://raw.githubusercontent.com/adhilwork/techcake-django-app-v3/${GITHUB_SHA}/docker-compose.yml" \
+            -o "$COMPOSE"
+
+          aws ecr get-login-password --region ap-south-1 |
+            docker login --username AWS --password-stdin "$REGISTRY"
+
+          docker pull "$NEW_IMAGE"
+
+          docker rm -f django-v2
+
+          if ! IMAGE_URI="$NEW_IMAGE" \
+            docker compose -f "$COMPOSE" -p root up -d django; then
+            rollback || true
+            exit 1
+          fi
+
+          if ! docker exec nginx-proxy nginx -s reload; then
+            rollback || true
+            exit 1
+          fi
+
+          HEALTH_OK=false
+
+          for attempt in $(seq 1 18); do
+            RESPONSE=$(curl -fsS --max-time 10 "$HEALTH_URL" 2>/dev/null || true)
+
+            if [ -n "$RESPONSE" ] && \
+              printf '%s' "$RESPONSE" |
+              python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("version")==sys.argv[1] else 1)' "$GITHUB_SHA"; then
+              echo "HEALTH CHECK SUCCESS"
+              echo "$RESPONSE"
+              HEALTH_OK=true
+              break
+            fi
+
+            echo "Waiting for application health: attempt $attempt/18"
+            sleep 5
+          done
+
+          if [ "$HEALTH_OK" != "true" ]; then
+            rollback || true
+            exit 1
+          fi
+
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "DEPLOYED SHA: $GITHUB_SHA"
+          REMOTE
+
+          jq -n --rawfile command remote-deploy.sh \
+            '{commands: ["bash -s <<\"SSM_REMOTE_SCRIPT\"\n" + $command + "\nSSM_REMOTE_SCRIPT"]}' \
+            > ssm-parameters.json
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy Django v3 ${{ github.sha }}" \
+            --timeout-seconds 900 \
+            --parameters file://ssm-parameters.json \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "SSM COMMAND ID: $COMMAND_ID"
+
+          STATUS="Pending"
+
+          for attempt in $(seq 1 72); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query 'Status' \
+              --output text 2>/dev/null || echo "Pending")
+
+            echo "SSM STATUS: $STATUS"
+
+            case "$STATUS" in
+              Success)
+                break
+                ;;
+              Failed|TimedOut|Cancelled|Cancelling|DeliveryTimedOut|ExecutionTimedOut|Undeliverable|Terminated)
+                break
+                ;;
+            esac
+
+            sleep 5
+          done
+
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}' \
+            --output json || true
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "DEPLOYMENT FAILED"
+            exit 1
+          fi
