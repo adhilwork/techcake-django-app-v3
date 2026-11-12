@@ -1,0 +1,32 @@
+
+services:
+  django:
+    image: ${IMAGE_URI}
+    container_name: django-v2
+    env_file:
+      - /root/.env
+    restart: unless-stopped
+    networks:
+      - app-network
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=5).close()"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ap-south-1
+        awslogs-group: /docker/djangov2
+        awslogs-stream: django
+        awslogs-create-group: "true"
+
+networks:
+  app-network:
+    external: true
+    name: root_app-network
