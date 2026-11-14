@@ -9,15 +9,16 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'ap-south-1'
+        AWS_REGION    = 'ap-south-1'
         AWS_ACCOUNT_ID = '545931886180'
         ECR_REPOSITORY = 'techcake-django-app-v3'
-        INSTANCE_ID = 'i-0ec6e6efcabac1611'
-        HEALTH_URL = 'https://djangov2.tc-0054.nixlabs.in/health'
-        REGISTRY = '545931886180.dkr.ecr.ap-south-1.amazonaws.com'
+        INSTANCE_ID    = 'i-0ec6e6efcabac1611'
+        HEALTH_URL     = 'https://djangov2.tc-0054.nixlabs.in/health'
+        REGISTRY       = '545931886180.dkr.ecr.ap-south-1.amazonaws.com'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
@@ -31,7 +32,7 @@ pipeline {
                     env.IMAGE_URI = "${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
                     echo "Commit SHA: ${IMAGE_TAG}"
-                    echo "Image: ${IMAGE_URI}"
+                    echo "Image URI: ${IMAGE_URI}"
                 }
             }
         }
@@ -69,7 +70,8 @@ pipeline {
                       -v "$WORKSPACE:/work" \
                       -v "$WORKSPACE/trivy-cache:/root/.cache/" \
                       aquasec/trivy:0.76.2 \
-                      image --format json \
+                      image \
+                      --format json \
                       --output /work/trivy-report.json \
                       --severity HIGH,CRITICAL \
                       --exit-code 0 \
@@ -79,7 +81,8 @@ pipeline {
                       -v /var/run/docker.sock:/var/run/docker.sock \
                       -v "$WORKSPACE/trivy-cache:/root/.cache/" \
                       aquasec/trivy:0.76.2 \
-                      image --format table \
+                      image \
+                      --format table \
                       --severity CRITICAL \
                       --exit-code 1 \
                       "$IMAGE_URI"
@@ -90,7 +93,10 @@ pipeline {
         stage('Push') {
             steps {
                 sh '''
-                    aws ecr get-login-password --region "$AWS_REGION" |
+                    set -e
+
+                    aws ecr get-login-password \
+                      --region "$AWS_REGION" |
                     docker login \
                       --username AWS \
                       --password-stdin "$REGISTRY"
@@ -98,9 +104,14 @@ pipeline {
                     if aws ecr describe-images \
                       --repository-name "$ECR_REPOSITORY" \
                       --image-ids imageTag="$IMAGE_TAG" \
-                      --region "$AWS_REGION" >/dev/null 2>&1; then
-                        echo "Image tag already exists in ECR. Skipping push: $IMAGE_TAG"
+                      --region "$AWS_REGION" \
+                      >/dev/null 2>&1; then
+
+                        echo "Image already exists in ECR."
+                        echo "Skipping push: $IMAGE_TAG"
+
                     else
+                        echo "Image not found. Pushing image..."
                         docker push "$IMAGE_URI"
                     fi
                 '''
@@ -122,17 +133,17 @@ ROLLBACK_IMAGE="django-v2:rollback-${GIT_SHA}"
 HEALTH_URL="https://djangov2.tc-0054.nixlabs.in/health"
 
 if [ ! -f /root/.env ]; then
-    echo "Missing /root/.env"
+    echo "ERROR: /root/.env not found"
     exit 1
 fi
 
 if ! docker inspect django-v2 >/dev/null 2>&1; then
-    echo "Existing django-v2 container not found"
+    echo "ERROR: Existing django-v2 container not found"
     exit 1
 fi
 
 if ! docker inspect nginx-proxy >/dev/null 2>&1; then
-    echo "nginx-proxy container not found"
+    echo "ERROR: nginx-proxy container not found"
     exit 1
 fi
 
@@ -140,11 +151,19 @@ OLD_IMAGE_ID=$(docker inspect -f '{{.Image}}' django-v2)
 docker tag "$OLD_IMAGE_ID" "$ROLLBACK_IMAGE"
 
 rollback() {
-    echo "Deployment failed. Rolling back..."
+    echo "Deployment failed. Starting rollback..."
+
+    trap - ERR
     set +e
+
     docker rm -f django-v2
-    IMAGE_URI="$ROLLBACK_IMAGE" docker compose -f "$COMPOSE" -p root up -d --no-deps django
+
+    IMAGE_URI="$ROLLBACK_IMAGE" \
+      docker compose -f "$COMPOSE" -p root up -d --no-deps django
+
     docker exec nginx-proxy nginx -s reload
+
+    echo "Rollback completed."
     exit 1
 }
 
@@ -159,15 +178,21 @@ docker login --username AWS --password-stdin "$REGISTRY"
 
 docker pull "$IMAGE_URI"
 
-IMAGE_URI="$IMAGE_URI" docker compose -f "$COMPOSE" -p root up -d --no-deps django
+IMAGE_URI="$IMAGE_URI" \
+  docker compose -f "$COMPOSE" -p root up -d --no-deps django
 
 docker exec nginx-proxy nginx -s reload
 
+echo "Checking application health..."
+
 for i in $(seq 1 18); do
+
     RESPONSE=$(curl -fsS "$HEALTH_URL" || true)
 
     VERSION=$(printf '%s' "$RESPONSE" | python3 -c '
-import json,sys
+import json
+import sys
+
 try:
     print(json.load(sys.stdin).get("version", ""))
 except Exception:
@@ -175,26 +200,24 @@ except Exception:
 ')
 
     if [ "$VERSION" = "$GIT_SHA" ]; then
-        echo "Deployment successful: $VERSION"
+        echo "Deployment successful."
+        echo "Deployed version: $VERSION"
+
         trap - ERR
         exit 0
     fi
 
+    echo "Health check attempt $i failed."
     sleep 5
 done
 
-echo "Health check failed or version mismatch"
+echo "ERROR: Health check failed or version mismatch."
 false
 '''
 
                     remoteScript = remoteScript
                         .replace('__GIT_SHA__', env.IMAGE_TAG)
                         .replace('__IMAGE_URI__', env.IMAGE_URI)
-
-                    writeFile(
-                        file: 'remote-deploy.sh',
-                        text: remoteScript
-                    )
 
                     def commandJson = groovy.json.JsonOutput.toJson([
                         DocumentName: 'AWS-RunShellScript',
@@ -212,6 +235,8 @@ false
                     )
 
                     sh '''
+                        set -e
+
                         COMMAND_ID=$(aws ssm send-command \
                           --cli-input-json file://ssm-command.json \
                           --region "$AWS_REGION" \
@@ -221,6 +246,7 @@ false
                         echo "SSM Command ID: $COMMAND_ID"
 
                         for i in $(seq 1 60); do
+
                             STATUS=$(aws ssm get-command-invocation \
                               --command-id "$COMMAND_ID" \
                               --instance-id "$INSTANCE_ID" \
@@ -231,30 +257,34 @@ false
                             echo "SSM Status: $STATUS"
 
                             if [ "$STATUS" = "Success" ]; then
+
                                 aws ssm get-command-invocation \
                                   --command-id "$COMMAND_ID" \
                                   --instance-id "$INSTANCE_ID" \
                                   --region "$AWS_REGION" \
                                   --query 'StandardOutputContent' \
                                   --output text
+
                                 exit 0
                             fi
 
                             if [ "$STATUS" = "Failed" ] || \
                                [ "$STATUS" = "Cancelled" ] || \
                                [ "$STATUS" = "TimedOut" ]; then
+
                                 aws ssm get-command-invocation \
                                   --command-id "$COMMAND_ID" \
                                   --instance-id "$INSTANCE_ID" \
                                   --region "$AWS_REGION" \
                                   --output json
+
                                 exit 1
                             fi
 
                             sleep 10
                         done
 
-                        echo "SSM command timed out"
+                        echo "ERROR: SSM command timed out."
                         exit 1
                     '''
                 }
@@ -264,20 +294,29 @@ false
         stage('Verify') {
             steps {
                 sh '''
-                    RESPONSE=$(curl -fsS --retry 5 --retry-delay 5 "$HEALTH_URL")
+                    set -e
+
+                    RESPONSE=$(curl -fsS \
+                      --retry 5 \
+                      --retry-delay 5 \
+                      "$HEALTH_URL")
 
                     echo "$RESPONSE" | python3 -c '
-import json,sys
-data=json.load(sys.stdin)
-expected=sys.argv[1]
-actual=data.get("version", "")
+import json
+import sys
+
+data = json.load(sys.stdin)
+expected = sys.argv[1]
+actual = data.get("version", "")
+
 print("Expected version:", expected)
 print("Actual version:", actual)
-if actual != expected:
-    raise SystemExit("Version verification failed")
-' "$IMAGE_TAG"
 
-                    echo "Application health and version verified."
+if actual != expected:
+    raise SystemExit("ERROR: Version verification failed")
+
+print("Application health and version verified.")
+' "$IMAGE_TAG"
                 '''
             }
         }
