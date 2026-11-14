@@ -95,7 +95,14 @@ pipeline {
                       --username AWS \
                       --password-stdin "$REGISTRY"
 
-                    docker push "$IMAGE_URI"
+                    if aws ecr describe-images \
+                      --repository-name "$ECR_REPOSITORY" \
+                      --image-ids imageTag="$IMAGE_TAG" \
+                      --region "$AWS_REGION" >/dev/null 2>&1; then
+                        echo "Image tag already exists in ECR. Skipping push: $IMAGE_TAG"
+                    else
+                        docker push "$IMAGE_URI"
+                    fi
                 '''
             }
         }
