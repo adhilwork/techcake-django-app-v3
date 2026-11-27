@@ -131,19 +131,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters \
-              "Name=tag:aws:autoscaling:groupName,Values=TechcakeDjangoV3ASG" \
-              "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].InstanceId | [0]' \
+          TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups \
+            --names TechcakeDjangoV3TG \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+
+          INSTANCE_ID=$(aws elbv2 describe-target-health \
+            --target-group-arn "$TARGET_GROUP_ARN" \
+            --query "TargetHealthDescriptions[?TargetHealth.State=='healthy'] | [0].Target.Id" \
             --output text)
 
           if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
-            echo "ERROR: No running application instance found."
+            echo "ERROR: No healthy production instance found."
             exit 1
           fi
 
-          echo "Running migration on one instance: $INSTANCE_ID"
+          echo "Running migration on production instance: $INSTANCE_ID"
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
@@ -202,6 +205,11 @@ jobs:
             --description "GitHub Actions deployment ${GITHUB_SHA}" \
             --query 'deploymentId' \
             --output text)
+
+          if [ -z "$DEPLOYMENT_ID" ] || [ "$DEPLOYMENT_ID" = "None" ]; then
+            echo "ERROR: CodeDeploy did not return a deployment ID."
+            exit 1
+          fi
 
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
           echo "Started CodeDeploy deployment: $DEPLOYMENT_ID"
