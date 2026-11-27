@@ -40,7 +40,9 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --build-arg APP_VERSION=${{ github.sha }} -t techcake-django-app-v3:${{ github.sha }} .
+          docker build \
+            --build-arg APP_VERSION=${{ github.sha }} \
+            -t techcake-django-app-v3:${{ github.sha }} .
 
       - name: Prepare Trivy cache
         run: mkdir -p "${{ runner.temp }}/trivy-cache"
@@ -105,20 +107,108 @@ jobs:
           if [ "$IMAGE_EXISTS" = "$IMAGE_TAG" ]; then
             echo "Image already exists in ECR. Skipping push."
           else
-            docker tag techcake-django-app-v3:$IMAGE_TAG $REGISTRY/techcake-django-app-v3:$IMAGE_TAG
+            docker tag techcake-django-app-v3:$IMAGE_TAG \
+              $REGISTRY/techcake-django-app-v3:$IMAGE_TAG
             docker push $REGISTRY/techcake-django-app-v3:$IMAGE_TAG
           fi
 
   deploy:
     needs: build
-    if: false
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::545931886180:role/GitHubActionsECRRole
           aws-region: ap-south-1
 
-      - name: Deploy through SSM with automatic rollback
-        run: echo "Deployment temporarily disabled. Jenkins handles deployment."
+      - name: Run database migrations once
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:aws:autoscaling:groupName,Values=TechcakeDjangoV3ASG" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId | [0]' \
+            --output text)
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "ERROR: No running application instance found."
+            exit 1
+          fi
+
+          echo "Running migration on one instance: $INSTANCE_ID"
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{"commands":["docker exec django-v3 python manage.py migrate --noinput"]}' \
+            --query 'Command.CommandId' \
+            --output text)
+
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"
+
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query 'Status' \
+            --output text)
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "ERROR: Database migration failed."
+            exit 1
+          fi
+
+          echo "Database migration completed successfully."
+
+      - name: Prepare CodeDeploy revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE_URI="545931886180.dkr.ecr.ap-south-1.amazonaws.com/techcake-django-app-v3:${GITHUB_SHA}"
+
+          printf '%s\n' "$IMAGE_URI" > image_uri.txt
+          chmod +x scripts/*.sh
+
+          zip -r deployment.zip \
+            appspec.yml \
+            image_uri.txt \
+            scripts/
+
+      - name: Upload revision to S3
+        run: |
+          aws s3 cp deployment.zip \
+            "s3://tc-0054-django2-files-2026/codedeploy/${GITHUB_SHA}.zip"
+
+      - name: Start CodeDeploy Blue Green deployment
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name TechcakeDjangoV3App \
+            --deployment-group-name TechcakeDjangoV3BGGroup \
+            --revision "{\"revisionType\":\"S3\",\"s3Location\":{\"bucket\":\"tc-0054-django2-files-2026\",\"key\":\"codedeploy/${GITHUB_SHA}.zip\",\"bundleType\":\"zip\"}}" \
+            --description "GitHub Actions deployment ${GITHUB_SHA}" \
+            --query 'deploymentId' \
+            --output text)
+
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "Started CodeDeploy deployment: $DEPLOYMENT_ID"
+
+      - name: Wait for CodeDeploy result
+        run: |
+          aws deploy wait deployment-successful \
+            --deployment-id "${{ steps.deploy.outputs.deployment_id }}"
+
+          echo "Blue Green deployment completed successfully."
