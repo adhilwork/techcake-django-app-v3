@@ -215,8 +215,34 @@ jobs:
           echo "Started CodeDeploy deployment: $DEPLOYMENT_ID"
 
       - name: Wait for CodeDeploy result
+        shell: bash
         run: |
-          aws deploy wait deployment-successful \
-            --deployment-id "${{ steps.deploy.outputs.deployment_id }}"
+          set -euo pipefail
 
-          echo "Blue Green deployment completed successfully."
+          DEPLOYMENT_ID="${{ steps.deploy.outputs.deployment_id }}"
+
+          echo "Waiting for CodeDeploy deployment: $DEPLOYMENT_ID"
+
+          for attempt in $(seq 1 180); do
+            STATUS=$(aws deploy get-deployment \
+              --deployment-id "$DEPLOYMENT_ID" \
+              --query 'deploymentInfo.status' \
+              --output text)
+
+            echo "Attempt $attempt: Deployment status = $STATUS"
+
+            if [ "$STATUS" = "Succeeded" ]; then
+              echo "Blue Green deployment completed successfully."
+              exit 0
+            fi
+
+            if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Stopped" ]; then
+              echo "ERROR: CodeDeploy deployment $STATUS."
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          echo "ERROR: Deployment did not complete within 90 minutes."
+          exit 1
